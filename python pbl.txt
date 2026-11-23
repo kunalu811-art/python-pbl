@@ -1,0 +1,376 @@
+"""
+Project Title : Library Management System (PBL Edition)
+File Name     : lms_app.py
+Data File     : lms_data.json (Auto-created & auto-saved)
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+
+STORAGE_FILE = "lms_data.json"
+DATE_FMT = "%Y-%m-%d"
+LOAN_PERIOD_DAYS = 14
+FINE_PER_DAY = 5.0
+
+
+@dataclass
+class BookRecord:
+    book_id: str
+    title: str
+    author: str
+    total_copies: int
+    available_copies: int
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class IssuedRecord:
+    book_id: str
+    title: str
+    borrower_name: str
+    issue_date: str
+    due_date: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+class LibrarySystem:
+    def __init__(self, storage_file: str = STORAGE_FILE) -> None:
+        self.storage_file = storage_file
+        self.books: Dict[str, BookRecord] = {}
+        self.issued_books: List[IssuedRecord] = []
+        self._load_or_seed()
+
+    def _seed_data(self) -> None:
+        initial_books = [
+            BookRecord("B101", "Python Crash Course", "Eric Matthes", 4, 3),
+            BookRecord("B102", "Clean Code", "Robert C. Martin", 3, 2),
+            BookRecord("B103", "Database System Concepts", "Abraham Silberschatz", 5, 5),
+            BookRecord("B104", "Computer Networks", "Andrew S. Tanenbaum", 2, 2),
+        ]
+        for book in initial_books:
+            self.books[book.book_id] = book
+
+        today = datetime.now().date()
+        self.issued_books = [
+            IssuedRecord(
+                book_id="B101",
+                title="Python Crash Course",
+                borrower_name="Rohan Verma",
+                issue_date=(today - timedelta(days=5)).strftime(DATE_FMT),
+                due_date=(today + timedelta(days=9)).strftime(DATE_FMT),
+            ),
+            IssuedRecord(
+                book_id="B102",
+                title="Clean Code",
+                borrower_name="Ananya Gupta",
+                issue_date=(today - timedelta(days=19)).strftime(DATE_FMT),
+                due_date=(today - timedelta(days=5)).strftime(DATE_FMT),
+            ),
+        ]
+        self.save()
+
+    def _load_or_seed(self) -> None:
+        if not os.path.exists(self.storage_file):
+            self._seed_data()
+            return
+        try:
+            with open(self.storage_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for b in data.get("books", []):
+                book = BookRecord(**b)
+                self.books[book.book_id] = book
+            for ib in data.get("issued_books", []):
+                self.issued_books.append(IssuedRecord(**ib))
+        except (json.JSONDecodeError, KeyError, TypeError):
+            print("[Notice] Data file reset with default PBL sample records.")
+            self._seed_data()
+
+    def save(self) -> None:
+        payload = {
+            "books": [b.to_dict() for b in self.books.values()],
+            "issued_books": [ib.to_dict() for ib in self.issued_books],
+        }
+        with open(self.storage_file, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    # 1. Add Book
+    def add_book(self, book_id: str, title: str, author: str, copies: int) -> tuple[bool, str]:
+        bid = book_id.strip().upper()
+        title = title.strip()
+        author = author.strip()
+        if not bid or not title or not author:
+            return False, "Book ID, Title, and Author are required."
+        if copies <= 0:
+            return False, "Copies must be greater than 0."
+        if bid in self.books:
+            return False, f"Book ID '{bid}' already exists. Use option 7 (Update Book) to modify it."
+
+        self.books[bid] = BookRecord(
+            book_id=bid,
+            title=title,
+            author=author,
+            total_copies=copies,
+            available_copies=copies,
+        )
+        self.save()
+        return True, f"Book '{title}' (ID: {bid}) added with {copies} copy/copies."
+
+    # 2. Display All Books
+    def get_all_books(self) -> List[BookRecord]:
+        return list(self.books.values())
+
+    # 3. Search Book
+    def search_books(self, keyword: str) -> List[BookRecord]:
+        key = keyword.strip().lower()
+        if not key:
+            return []
+        return [
+            b
+            for b in self.books.values()
+            if key in b.book_id.lower() or key in b.title.lower() or key in b.author.lower()
+        ]
+
+    # 4. Issue Book
+    def issue_book(self, book_id: str, borrower_name: str) -> tuple[bool, str]:
+        bid = book_id.strip().upper()
+        borrower = borrower_name.strip()
+        if not borrower:
+            return False, "Borrower name cannot be empty."
+        book = self.books.get(bid)
+        if not book:
+            return False, f"No book found with ID '{bid}'."
+        if book.available_copies <= 0:
+            return False, f"'{book.title}' is currently out of stock."
+        if any(ib.book_id == bid and ib.borrower_name.lower() == borrower.lower() for ib in self.issued_books):
+            return False, f"{borrower} has already issued '{book.title}'."
+
+        today = datetime.now().date()
+        due = today + timedelta(days=LOAN_PERIOD_DAYS)
+        self.issued_books.append(
+            IssuedRecord(
+                book_id=book.book_id,
+                title=book.title,
+                borrower_name=borrower,
+                issue_date=today.strftime(DATE_FMT),
+                due_date=due.strftime(DATE_FMT),
+            )
+        )
+        book.available_copies -= 1
+        self.save()
+        return True, f"Issued '{book.title}' to {borrower}. Due Date: {due.strftime(DATE_FMT)}."
+
+    # 5. Return Book
+    def return_book(self, book_id: str, borrower_name: str) -> tuple[bool, str]:
+        bid = book_id.strip().upper()
+        borrower = borrower_name.strip().lower()
+        match_index: Optional[int] = None
+
+        for idx, item in enumerate(self.issued_books):
+            if item.book_id == bid and item.borrower_name.lower() == borrower:
+                match_index = idx
+                break
+
+        if match_index is None:
+            return False, f"No active issue record found for Book ID '{bid}' under '{borrower_name}'."
+
+        record = self.issued_books.pop(match_index)
+        if bid in self.books:
+            book = self.books[bid]
+            book.available_copies = min(book.total_copies, book.available_copies + 1)
+
+        today = datetime.now().date()
+        due_dt = datetime.strptime(record.due_date, DATE_FMT).date()
+        overdue_days = max(0, (today - due_dt).days)
+        fine = round(overdue_days * FINE_PER_DAY, 2)
+        self.save()
+
+        if overdue_days > 0:
+            return True, f"Returned '{record.title}' ({overdue_days} day(s) late). Fine Payable: {fine:.2f}."
+        return True, f"Returned '{record.title}' on time. Fine Payable: 0.00."
+
+    # 6. Delete Book
+    def delete_book(self, book_id: str) -> tuple[bool, str]:
+        bid = book_id.strip().upper()
+        book = self.books.get(bid)
+        if not book:
+            return False, f"No book found with ID '{bid}'."
+        if any(ib.book_id == bid for ib in self.issued_books):
+            return False, f"Cannot delete '{book.title}' because copies are currently issued."
+
+        del self.books[bid]
+        self.save()
+        return True, f"Book '{book.title}' (ID: {bid}) deleted."
+
+    # 7. Update Book
+    def update_book(
+        self,
+        book_id: str,
+        new_title: Optional[str] = None,
+        new_author: Optional[str] = None,
+        new_total_copies: Optional[int] = None,
+    ) -> tuple[bool, str]:
+        bid = book_id.strip().upper()
+        book = self.books.get(bid)
+        if not book:
+            return False, f"No book found with ID '{bid}'."
+
+        currently_issued = book.total_copies - book.available_copies
+        if new_total_copies is not None:
+            if new_total_copies < currently_issued:
+                return (
+                    False,
+                    f"Total copies ({new_total_copies}) cannot be less than currently issued copies ({currently_issued}).",
+                )
+            book.total_copies = new_total_copies
+            book.available_copies = new_total_copies - currently_issued
+
+        if new_title:
+            book.title = new_title.strip()
+        if new_author:
+            book.author = new_author.strip()
+
+        self.save()
+        return True, f"Updated Book ID '{bid}' successfully."
+
+    # 8. Display Issued Books
+    def get_issued_books(self) -> List[IssuedRecord]:
+        return list(self.issued_books)
+
+
+def display_books_table(books: List[BookRecord]) -> None:
+    if not books:
+        print("\nNo books found.")
+        return
+    print("\n" + "-" * 86)
+    print(f"{'ID':<7} | {'Title':<28} | {'Author':<22} | {'Avail':<5} | {'Total'}")
+    print("-" * 86)
+    for b in books:
+        t = (b.title[:25] + "...") if len(b.title) > 28 else b.title
+        a = (b.author[:19] + "...") if len(b.author) > 22 else b.author
+        print(f"{b.book_id:<7} | {t:<28} | {a:<22} | {b.available_copies:<5} | {b.total_copies}")
+    print("-" * 86)
+
+
+def display_issued_table(records: List[IssuedRecord]) -> None:
+    if not records:
+        print("\nNo books are currently issued.")
+        return
+    today = datetime.now().date()
+    print("\n" + "-" * 96)
+    print(f"{'Book ID':<8} | {'Title':<24} | {'Borrower':<18} | {'Issue Date':<11} | {'Due Date':<11} | {'Status'}")
+    print("-" * 96)
+    for r in records:
+        t = (r.title[:21] + "...") if len(r.title) > 24 else r.title
+        br = (r.borrower_name[:15] + "...") if len(r.borrower_name) > 18 else r.borrower_name
+        due_dt = datetime.strptime(r.due_date, DATE_FMT).date()
+        status = f"Overdue ({(today - due_dt).days}d)" if today > due_dt else "Active"
+        print(f"{r.book_id:<8} | {t:<24} | {br:<18} | {r.issue_date:<11} | {r.due_date:<11} | {status}")
+    print("-" * 96)
+
+
+def read_positive_int(prompt: str) -> Optional[int]:
+    try:
+        val = int(input(prompt).strip())
+        if val <= 0:
+            print("[Error] Please enter a positive whole number.")
+            return None
+        return val
+    except ValueError:
+        print("[Error] Invalid input. Please enter a number.")
+        return None
+
+
+def main() -> None:
+    system = LibrarySystem()
+
+    while True:
+        print("\n================================")
+        print("      LIBRARY MANAGEMENT SYSTEM")
+        print("================================")
+        print("1. Add Book")
+        print("2. Display All Books")
+        print("3. Search Book")
+        print("4. Issue Book")
+        print("5. Return Book")
+        print("6. Delete Book")
+        print("7. Update Book")
+        print("8. Display Issued Books")
+        print("9. Exit")
+
+        choice = input("\nEnter your choice (1-9): ").strip()
+
+        if choice == "1":
+            bid = input("Enter Book ID: ")
+            title = input("Enter Title: ")
+            author = input("Enter Author: ")
+            copies = read_positive_int("Enter Total Copies: ")
+            if copies is not None:
+                ok, msg = system.add_book(bid, title, author, copies)
+                print(f"[{'SUCCESS' if ok else 'ERROR'}] {msg}")
+
+        elif choice == "2":
+            display_books_table(system.get_all_books())
+
+        elif choice == "3":
+            keyword = input("Enter Book ID, Title, or Author to search: ")
+            display_books_table(system.search_books(keyword))
+
+        elif choice == "4":
+            bid = input("Enter Book ID to issue: ")
+            borrower = input("Enter Borrower Name: ")
+            ok, msg = system.issue_book(bid, borrower)
+            print(f"[{'SUCCESS' if ok else 'ERROR'}] {msg}")
+
+        elif choice == "5":
+            bid = input("Enter Book ID to return: ")
+            borrower = input("Enter Borrower Name: ")
+            ok, msg = system.return_book(bid, borrower)
+            print(f"[{'SUCCESS' if ok else 'ERROR'}] {msg}")
+
+        elif choice == "6":
+            bid = input("Enter Book ID to delete: ")
+            ok, msg = system.delete_book(bid)
+            print(f"[{'SUCCESS' if ok else 'ERROR'}] {msg}")
+
+        elif choice == "7":
+            bid = input("Enter Book ID to update: ")
+            new_title = input("New Title (press Enter to keep current): ").strip() or None
+            new_author = input("New Author (press Enter to keep current): ").strip() or None
+            copies_raw = input("New Total Copies (press Enter to keep current): ").strip()
+            new_copies: Optional[int] = None
+            if copies_raw:
+                try:
+                    parsed = int(copies_raw)
+                    if parsed <= 0:
+                        print("[Error] Total copies must be greater than 0.")
+                        continue
+                    new_copies = parsed
+                except ValueError:
+                    print("[Error] Invalid number for total copies.")
+                    continue
+            ok, msg = system.update_book(bid, new_title, new_author, new_copies)
+            print(f"[{'SUCCESS' if ok else 'ERROR'}] {msg}")
+
+        elif choice == "8":
+            display_issued_table(system.get_issued_books())
+
+        elif choice == "9":
+            system.save()
+            print("\nRecords saved to lms_data.json. Exiting Library Management System. Goodbye!")
+            break
+
+        else:
+            print("[Error] Please select a valid option between 1 and 9.")
+
+
+if __name__ == "__main__":
+    main()
